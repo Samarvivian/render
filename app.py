@@ -4,52 +4,68 @@ import time
 
 app = Flask(__name__)
 
-
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({'status': 'edge node running', 'time': time.time()})
 
-
 @app.route('/blind_process', methods=['POST'])
 def blind_process():
     data = request.json
-
-    # 从主节点收到：公钥 + 密文列表 + 操作类型
     public_key = paillier.PaillierPublicKey(n=int(data['public_key_n']))
-    operation = data['operation']  # 'brighten' / 'blur'
-    width = data['width']
-    height = data['height']
+    operation  = data['operation']
+    width      = data['width']
+    height     = data['height']
+    channels   = data.get('channels', 1)  # 1=灰度, 3=RGB
 
-    # 恢复密文列表（服务器只看到大整数，完全不知道图片内容）
-    enc_pixels = [
-        paillier.EncryptedNumber(public_key, int(c))
-        for c in data['encrypted_pixels']
-    ]
+    # 服务器只看到密文大整数，完全不知道图片内容
+    if channels == 3:
+        # RGB三通道分别处理
+        result_channels = []
+        for ch in range(3):
+            enc_ch = [
+                paillier.EncryptedNumber(public_key, int(c))
+                for c in data['encrypted_pixels'][ch]
+            ]
+            if operation == 'brighten':
+                amount = data.get('amount', 50)
+                processed = [p + amount for p in enc_ch]
+                counts = [1] * len(processed)
+            elif operation == 'blur':
+                processed, counts = blind_blur(enc_ch, width, height)
+            elif operation == 'darken':
+                amount = data.get('amount', 50)
+                processed = [p + (-amount) for p in enc_ch]
+                counts = [1] * len(processed)
 
-    print(f"收到 {len(enc_pixels)} 个密文，执行 {operation}")
+            result_channels.append({
+                'pixels': [str(e.ciphertext()) for e in processed],
+                'counts': counts
+            })
 
-    if operation == 'brighten':
-        amount = data.get('amount', 50)
-        result = [p + amount for p in enc_pixels]
+        return jsonify({'channels': result_channels, 'status': 'ok'})
 
-    elif operation == 'blur':
-        result, counts = blind_blur(enc_pixels, width, height)
-        # blur需要额外返回counts供解密时使用
+    else:
+        # 灰度单通道
+        enc_pixels = [
+            paillier.EncryptedNumber(public_key, int(c))
+            for c in data['encrypted_pixels']
+        ]
+        if operation == 'brighten':
+            amount = data.get('amount', 50)
+            result = [p + amount for p in enc_pixels]
+            counts = [1] * len(result)
+        elif operation == 'blur':
+            result, counts = blind_blur(enc_pixels, width, height)
+
         return jsonify({
             'result': [str(e.ciphertext()) for e in result],
             'counts': counts,
             'status': 'ok'
         })
 
-    return jsonify({
-        'result': [str(e.ciphertext()) for e in result],
-        'counts': [1] * len(result),
-        'status': 'ok'
-    })
-
 
 def blind_blur(enc_pixels, width, height):
-    """均值模糊——服务器看不到任何像素值"""
+    """均值模糊——服务器全程看不到任何像素值"""
     result = []
     counts = []
     for i in range(height):
